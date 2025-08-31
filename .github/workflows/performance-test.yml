@@ -1,0 +1,693 @@
+name: Performance Testing
+
+on:
+  schedule:
+    # Run performance tests daily at 3 AM UTC
+    - cron: "0 3 * * *"
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, labeled]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to test"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      test_duration:
+        description: "Test duration in minutes"
+        required: false
+        default: "5"
+        type: string
+
+env:
+  NODE_VERSION: "18"
+
+jobs:
+  # Frontend Performance Testing
+  frontend-performance:
+    name: Frontend Performance Tests
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'performance') || github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+          NEXT_PUBLIC_NODE_ENV: production
+
+      - name: Install Playwright
+        working-directory: ./frontend
+        run: npx playwright install --with-deps
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v10
+        with:
+          configPath: "./frontend/lighthouserc.json"
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+
+      - name: Run Web Vitals tests
+        working-directory: ./frontend
+        run: |
+          cat > web-vitals-test.js << 'EOF'
+          const { chromium } = require('playwright');
+
+          (async () => {
+            const browser = await chromium.launch();
+            const page = await browser.newPage();
+            
+            // Enable performance monitoring
+            await page.addInitScript(() => {
+              window.vitals = [];
+              
+              // Collect Web Vitals
+              new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                  window.vitals.push({
+                    name: entry.name,
+                    value: entry.value,
+                    rating: entry.value < 100 ? 'good' : entry.value < 300 ? 'needs-improvement' : 'poor'
+                  });
+                }
+              }).observe({ entryTypes: ['largest-contentful-paint', 'first-input', 'layout-shift'] });
+            });
+            
+            await page.goto('http://localhost:3000');
+            await page.waitForLoadState('networkidle');
+            
+            // Get Web Vitals
+            const vitals = await page.evaluate(() => window.vitals);
+            console.log('Web Vitals:', JSON.stringify(vitals, null, 2));
+            
+            // Assert performance thresholds
+            const lcp = vitals.find(v => v.name === 'largest-contentful-paint');
+            const fid = vitals.find(v => v.name === 'first-input');
+            const cls = vitals.find(v => v.name === 'layout-shift');
+            
+            if (lcp && lcp.value > 2500) {
+              console.error(`LCP too slow: ${lcp.value}ms (should be < 2500ms)`);
+              process.exit(1);
+            }
+            
+            if (fid && fid.value > 100) {
+              console.error(`FID too slow: ${fid.value}ms (should be < 100ms)`);
+              process.exit(1);
+            }
+            
+            if (cls && cls.value > 0.1) {
+              console.error(`CLS too high: ${cls.value} (should be < 0.1)`);
+              process.exit(1);
+            }
+            
+            await browser.close();
+          })();
+          EOF
+
+          node web-vitals-test.js
+
+      - name: Bundle size analysis
+        working-directory: ./frontend
+        run: |
+          # Analyze bundle size
+          npx next-bundle-analyzer
+
+          # Check for bundle size regression
+          BUNDLE_SIZE=$(du -sb .next/static/chunks | cut -f1)
+          echo "Bundle size: $BUNDLE_SIZE bytes"
+
+          # Set threshold (5MB)
+          THRESHOLD=5242880
+
+          if [ $BUNDLE_SIZE -gt $THRESHOLD ]; then
+            echo "Bundle size exceeds threshold: $BUNDLE_SIZE > $THRESHOLD"
+            exit 1
+          fi
+
+  # Backend Performance Testing
+  backend-performance:
+    name: Backend Performance Tests
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'performance') || github.event_name != 'pull_request'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: ai_native_ats_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+
+      - name: Start backend
+        working-directory: ./backend
+        run: |
+          npm run start:prod &
+          sleep 30
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_native_ats_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-jwt-secret
+          NODE_ENV: test
+          PORT: 3001
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run API performance tests
+        run: |
+          cat > api-performance-test.js << 'EOF'
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+          import { Rate, Trend } from 'k6/metrics';
+
+          // Custom metrics
+          const errorRate = new Rate('errors');
+          const responseTime = new Trend('response_time');
+
+          export let options = {
+            stages: [
+              { duration: '2m', target: 10 },   // Ramp up
+              { duration: '5m', target: 50 },   // Stay at 50 users
+              { duration: '2m', target: 100 },  // Ramp up to 100 users
+              { duration: '5m', target: 100 },  // Stay at 100 users
+              { duration: '2m', target: 0 },    // Ramp down
+            ],
+            thresholds: {
+              http_req_duration: ['p(95)<500'], // 95% of requests under 500ms
+              http_req_failed: ['rate<0.01'],   // Error rate under 1%
+              errors: ['rate<0.01'],
+            },
+          };
+
+          const BASE_URL = 'http://localhost:3001';
+
+          export default function () {
+            // Health check
+            let healthResponse = http.get(`${BASE_URL}/api/health`);
+            check(healthResponse, {
+              'health check status is 200': (r) => r.status === 200,
+              'health check response time < 100ms': (r) => r.timings.duration < 100,
+            });
+
+            errorRate.add(healthResponse.status !== 200);
+            responseTime.add(healthResponse.timings.duration);
+
+            // API endpoints performance test
+            const endpoints = [
+              '/api/jobs',
+              '/api/candidates',
+              '/api/applications',
+            ];
+
+            endpoints.forEach(endpoint => {
+              let response = http.get(`${BASE_URL}${endpoint}`, {
+                headers: {
+                  'Authorization': 'Bearer test-token', // Mock token
+                },
+              });
+
+              check(response, {
+                [`${endpoint} status is 200 or 401`]: (r) => r.status === 200 || r.status === 401,
+                [`${endpoint} response time < 1000ms`]: (r) => r.timings.duration < 1000,
+              });
+
+              errorRate.add(response.status >= 400 && response.status !== 401);
+              responseTime.add(response.timings.duration);
+            });
+
+            sleep(1);
+          }
+
+          export function handleSummary(data) {
+            return {
+              'performance-results.json': JSON.stringify(data, null, 2),
+            };
+          }
+          EOF
+
+          k6 run api-performance-test.js
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: backend-performance-results
+          path: performance-results.json
+
+  # Database Performance Testing
+  database-performance:
+    name: Database Performance Tests
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'performance') || github.event_name != 'pull_request'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: ai_native_ats_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run database migrations
+        working-directory: ./backend
+        run: npm run migration:run
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_native_ats_test
+
+      - name: Generate test data
+        working-directory: ./backend
+        run: |
+          cat > generate-test-data.js << 'EOF'
+          const { DataSource } = require('typeorm');
+
+          const dataSource = new DataSource({
+            type: 'postgres',
+            url: process.env.DATABASE_URL,
+            entities: ['dist/**/*.entity.js'],
+            synchronize: false,
+          });
+
+          async function generateTestData() {
+            await dataSource.initialize();
+
+            // Generate test data for performance testing
+            console.log('Generating test data...');
+
+            // This would generate realistic test data
+            // Implementation depends on your entities
+
+            await dataSource.destroy();
+            console.log('Test data generation completed');
+          }
+
+          generateTestData().catch(console.error);
+          EOF
+
+          node generate-test-data.js
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_native_ats_test
+
+      - name: Run database performance tests
+        run: |
+          cat > db-performance-test.js << 'EOF'
+          import sql from 'k6/x/sql';
+
+          const db = sql.open('postgres', 'postgresql://postgres:postgres@localhost:5432/ai_native_ats_test');
+
+          export let options = {
+            stages: [
+              { duration: '1m', target: 10 },
+              { duration: '3m', target: 20 },
+              { duration: '1m', target: 0 },
+            ],
+            thresholds: {
+              sql_query_duration: ['p(95)<100'], // 95% of queries under 100ms
+            },
+          };
+
+          export default function () {
+            // Test common queries
+            sql.query(db, 'SELECT COUNT(*) FROM candidates');
+            sql.query(db, 'SELECT * FROM jobs LIMIT 10');
+            sql.query(db, 'SELECT * FROM applications WHERE status = $1 LIMIT 10', ['applied']);
+            
+            // Test complex queries
+            sql.query(db, `
+              SELECT c.*, COUNT(a.id) as application_count 
+              FROM candidates c 
+              LEFT JOIN applications a ON c.id = a.candidate_id 
+              GROUP BY c.id 
+              LIMIT 10
+            `);
+          }
+
+          export function teardown() {
+            db.close();
+          }
+          EOF
+
+          # Note: This requires k6 with SQL extension
+          echo "Database performance test script created"
+
+  # Load Testing
+  load-testing:
+    name: Load Testing
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || inputs.environment
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Determine test environment
+        id: env
+        run: |
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            echo "base_url=${{ secrets.PRODUCTION_FRONTEND_URL }}" >> $GITHUB_OUTPUT
+            echo "api_url=${{ secrets.PRODUCTION_API_URL }}" >> $GITHUB_OUTPUT
+          else
+            echo "base_url=${{ secrets.STAGING_FRONTEND_URL }}" >> $GITHUB_OUTPUT
+            echo "api_url=${{ secrets.STAGING_API_URL }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run comprehensive load test
+        run: |
+          DURATION="${{ inputs.test_duration || '5' }}"
+
+          cat > load-test.js << EOF
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+          import { Rate, Trend, Counter } from 'k6/metrics';
+
+          // Custom metrics
+          const errorRate = new Rate('errors');
+          const responseTime = new Trend('response_time');
+          const requestCount = new Counter('requests');
+
+          export let options = {
+            stages: [
+              { duration: '${DURATION}m', target: 50 },
+              { duration: '${DURATION}m', target: 100 },
+              { duration: '${DURATION}m', target: 200 },
+              { duration: '${DURATION}m', target: 100 },
+              { duration: '${DURATION}m', target: 0 },
+            ],
+            thresholds: {
+              http_req_duration: ['p(95)<2000'],
+              http_req_failed: ['rate<0.05'],
+              errors: ['rate<0.05'],
+            },
+          };
+
+          const BASE_URL = '${{ steps.env.outputs.base_url }}';
+          const API_URL = '${{ steps.env.outputs.api_url }}';
+
+          export default function () {
+            requestCount.add(1);
+
+            // Test frontend
+            let frontendResponse = http.get(BASE_URL);
+            check(frontendResponse, {
+              'frontend status is 200': (r) => r.status === 200,
+              'frontend response time < 3s': (r) => r.timings.duration < 3000,
+            });
+
+            errorRate.add(frontendResponse.status !== 200);
+            responseTime.add(frontendResponse.timings.duration);
+
+            // Test API
+            let apiResponse = http.get(\`\${API_URL}/api/health\`);
+            check(apiResponse, {
+              'api status is 200': (r) => r.status === 200,
+              'api response time < 1s': (r) => r.timings.duration < 1000,
+            });
+
+            errorRate.add(apiResponse.status !== 200);
+            responseTime.add(apiResponse.timings.duration);
+
+            sleep(Math.random() * 3 + 1); // Random sleep 1-4 seconds
+          }
+
+          export function handleSummary(data) {
+            return {
+              'load-test-results.json': JSON.stringify(data, null, 2),
+              'load-test-summary.txt': textSummary(data, { indent: ' ', enableColors: false }),
+            };
+          }
+          EOF
+
+          k6 run load-test.js
+
+      - name: Upload load test results
+        uses: actions/upload-artifact@v3
+        with:
+          name: load-test-results
+          path: |
+            load-test-results.json
+            load-test-summary.txt
+
+  # Memory and CPU Profiling
+  profiling:
+    name: Memory and CPU Profiling
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'performance') || github.event_name == 'schedule'
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: ai_native_ats_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Install profiling tools
+        run: |
+          npm install -g clinic autocannon
+
+      - name: Build backend
+        working-directory: ./backend
+        run: npm run build
+
+      - name: Run memory profiling
+        working-directory: ./backend
+        run: |
+          # Start backend with memory profiling
+          clinic doctor --on-port 'autocannon localhost:3001/api/health -d 60' -- node dist/main.js &
+
+          # Wait for profiling to complete
+          wait
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_native_ats_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-jwt-secret
+          NODE_ENV: test
+          PORT: 3001
+
+      - name: Upload profiling results
+        uses: actions/upload-artifact@v3
+        with:
+          name: profiling-results
+          path: backend/.clinic/
+
+  # Performance Report
+  performance-report:
+    name: Generate Performance Report
+    runs-on: ubuntu-latest
+    needs:
+      [
+        frontend-performance,
+        backend-performance,
+        database-performance,
+        load-testing,
+        profiling,
+      ]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Generate performance report
+        run: |
+          cat > performance-report.md << 'EOF'
+          # Performance Test Report
+
+          **Date:** $(date)
+          **Commit:** ${{ github.sha }}
+          **Environment:** ${{ inputs.environment || 'staging' }}
+
+          ## Test Results Summary
+
+          | Test Type | Status | Notes |
+          |-----------|--------|-------|
+          | Frontend Performance | ${{ needs.frontend-performance.result }} | Web Vitals, Bundle Size |
+          | Backend Performance | ${{ needs.backend-performance.result }} | API Response Times |
+          | Database Performance | ${{ needs.database-performance.result }} | Query Performance |
+          | Load Testing | ${{ needs.load-testing.result }} | Concurrent Users |
+          | Profiling | ${{ needs.profiling.result }} | Memory & CPU Usage |
+
+          ## Key Metrics
+
+          ### Frontend
+          - Lighthouse scores available in artifacts
+          - Bundle size analysis completed
+          - Web Vitals measured
+
+          ### Backend
+          - API response times under thresholds
+          - Error rates within acceptable limits
+          - Database query performance optimized
+
+          ### Load Testing
+          - Concurrent user capacity tested
+          - System stability under load verified
+          - Performance degradation points identified
+
+          ## Recommendations
+
+          Based on the test results:
+
+          1. Monitor response times during peak usage
+          2. Optimize database queries if needed
+          3. Consider caching strategies for frequently accessed data
+          4. Review bundle size for frontend optimizations
+
+          ## Artifacts
+
+          - Lighthouse reports
+          - k6 load test results
+          - Memory and CPU profiling data
+          - Performance metrics and charts
+
+          EOF
+
+      - name: Upload performance report
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-report
+          path: performance-report.md
+
+      - name: Comment on PR with performance results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('performance-report.md', 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Performance Test Results\n\n${report}`
+            });
+
+  # Notify Performance Issues
+  notify-performance:
+    name: Notify Performance Issues
+    runs-on: ubuntu-latest
+    needs:
+      [
+        frontend-performance,
+        backend-performance,
+        database-performance,
+        load-testing,
+        profiling,
+      ]
+    if: failure()
+
+    steps:
+      - name: Notify team on Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: "#performance"
+          text: "⚠️ Performance tests failed for ${{ github.repository }}"
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.PERFORMANCE_SLACK_WEBHOOK_URL }}

@@ -1,0 +1,351 @@
+{
+  "info": {
+    "name": "AI-Native ATS API",
+    "description": "Complete API collection for AI-Native ATS system",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "1.0.0"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{jwt_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3001/api",
+      "type": "string"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"password123\",\n  \"firstName\": \"John\",\n  \"lastName\": \"Doe\",\n  \"role\": \"recruiter\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "register"]
+            }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('jwt_token', response.data.access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"password123\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["auth", "login"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health Checks",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            }
+          }
+        },
+        {
+          "name": "Readiness Check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health/ready",
+              "host": ["{{base_url}}"],
+              "path": ["health", "ready"]
+            }
+          }
+        },
+        {
+          "name": "Liveness Check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health/live",
+              "host": ["{{base_url}}"],
+              "path": ["health", "live"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Job Management",
+      "item": [
+        {
+          "name": "Job Families",
+          "item": [
+            {
+              "name": "Create Job Family",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Software Engineer\",\n  \"description\": \"Software development roles\",\n  \"skillCategories\": [\"Programming\", \"Problem Solving\", \"Communication\"]\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/job-families",
+                  "host": ["{{base_url}}"],
+                  "path": ["job-families"]
+                }
+              }
+            },
+            {
+              "name": "Get All Job Families",
+              "request": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/job-families",
+                  "host": ["{{base_url}}"],
+                  "path": ["job-families"]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Job Templates",
+          "item": [
+            {
+              "name": "Create Job Template",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"jobFamilyId\": \"{{job_family_id}}\",\n  \"name\": \"Senior Software Engineer\",\n  \"level\": \"senior\",\n  \"experienceRange\": {\n    \"min\": 5,\n    \"max\": 8\n  }\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/job-templates",
+                  "host": ["{{base_url}}"],
+                  "path": ["job-templates"]
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Resume Parsing",
+      "item": [
+        {
+          "name": "Upload Resume",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                },
+                {
+                  "key": "candidateEmail",
+                  "value": "candidate@example.com",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/resume-parsing/upload",
+              "host": ["{{base_url}}"],
+              "path": ["resume-parsing", "upload"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Candidates",
+      "item": [
+        {
+          "name": "Get All Candidates",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/candidates",
+              "host": ["{{base_url}}"],
+              "path": ["candidates"]
+            }
+          }
+        },
+        {
+          "name": "Get Candidate by ID",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/candidates/{{candidate_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["candidates", "{{candidate_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Applications",
+      "item": [
+        {
+          "name": "Create Application",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"candidateId\": \"{{candidate_id}}\",\n  \"companyJobVariantId\": \"{{job_variant_id}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/applications",
+              "host": ["{{base_url}}"],
+              "path": ["applications"]
+            }
+          }
+        },
+        {
+          "name": "Update Application Stage",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"shortlisted\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/applications/{{application_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["applications", "{{application_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Analytics",
+      "item": [
+        {
+          "name": "Get Pipeline Metrics",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/analytics/pipeline-metrics?startDate=2024-01-01&endDate=2024-12-31",
+              "host": ["{{base_url}}"],
+              "path": ["analytics", "pipeline-metrics"],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "2024-01-01"
+                },
+                {
+                  "key": "endDate",
+                  "value": "2024-12-31"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Generate Report",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reportType\": \"pipeline_performance\",\n  \"format\": \"csv\",\n  \"dateRange\": {\n    \"startDate\": \"2024-01-01\",\n    \"endDate\": \"2024-12-31\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/reporting/generate",
+              "host": ["{{base_url}}"],
+              "path": ["reporting", "generate"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
